@@ -1,4 +1,6 @@
-use crate::smol_fd::{libc_check_error, SmolFd};
+use std::borrow::Borrow;
+use crate::smol_fd::SmolFd;
+use crate::libc_helpe::libc_check_error;
 use libbluetooth::bluetooth::bdaddr_t;
 use std::io::{Read, Result, Write};
 use std::mem::{size_of, MaybeUninit};
@@ -21,6 +23,27 @@ impl L2CAPListener {
                 libbluetooth::bluetooth::BTPROTO_L2CAP,
             )
         })?;
+
+        unsafe {
+            let opt: libc::c_int = 0;
+
+            libc_check_error(libc::setsockopt(
+                socket,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &opt as *const i32 as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t
+            ))?;
+
+            const BT_POWER: libc::c_int = 9;
+            libc_check_error(libc::setsockopt(
+                socket,
+                libc::SOL_BLUETOOTH,
+                BT_POWER,
+                &opt as *const i32 as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t
+            ))?;
+        }
 
         Ok(L2CAPListener {
             fd: SmolFd::new(socket),
@@ -123,6 +146,27 @@ impl L2CAPStream {
                 libbluetooth::bluetooth::BTPROTO_L2CAP,
             )
         })?;
+
+        unsafe {
+            let opt: libc::c_int = 0;
+
+            libc_check_error(libc::setsockopt(
+                socket,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &opt as *const i32 as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t
+            ))?;
+
+            const BT_POWER: libc::c_int = 9;
+            libc_check_error(libc::setsockopt(
+                socket,
+                libc::SOL_BLUETOOTH,
+                BT_POWER,
+                &opt as *const i32 as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t
+            ))?;
+        }
 
         Ok(L2CAPStream {
             fd: SmolFd::new(socket),

@@ -132,6 +132,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fd"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "275ab28c5c4076abec490e95cd4d69eaad40b6c16a2e692debd0e53453d006d0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -234,6 +243,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hciraw"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "510f5f58cd22e8f13d86901d71a981f944bd209762b4e31319bc5db0a00c5256"
+dependencies = [
+ "fd",
+ "libc",
+]
+
+[[package]]
 name = "hex"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -246,6 +265,7 @@ dependencies = [
  "blurz",
  "dbus 0.8.2",
  "futures",
+ "hciraw",
  "libbluetooth",
  "libc",
  "num-traits",

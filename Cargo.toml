@@ -18,3 +18,5 @@ smol = "0.1"
 futures = "0.3.4"
 # For generic nums
 num-traits = { version = "0.2", default-features = false }
+# For raw hci
+hciraw = "1.0"

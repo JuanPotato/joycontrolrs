@@ -8,6 +8,9 @@ use std::time::Duration;
 mod dbus_profile_manager;
 mod l2cap;
 mod smol_fd;
+mod libc_helpe;
+mod hci_utils;
+mod hcidev;
 
 use l2cap::{L2CAPListener, L2CAPStream};
 
@@ -15,7 +18,9 @@ use dbus::arg::{RefArg, Variant};
 use dbus::blocking::Connection;
 use dbus_profile_manager::OrgBluezProfileManager1;
 use std::num::ParseIntError;
+use std::io::Read;
 
+use smol::Async;
 use futures::prelude::*;
 
 const CONTROLLERS: [&str; 3] = ["Pro Controller", "Joy-Con (L)", "Joy-Con (R)"];
@@ -114,9 +119,12 @@ impl std::fmt::Display for BtAddr {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let id = 2;
+
     let session = BluetoothSession::create_session(None).unwrap();
-    let adapter = BluetoothAdapter::init(&session)?;
-    let adapter_addr = BtAddr::from_str(&adapter.get_address().unwrap()).unwrap();
+    let adapter = BluetoothAdapter::create_adapter(&session, format!("/org/bluez/hci{id}")).unwrap();
+    let adapter_addr_str = adapter.get_address().unwrap();
+    let adapter_addr = BtAddr::from_str(&adapter_addr_str).unwrap();
 
     let controller = scan_for_bluetooth_controller(&session, &adapter);
     let controller_addr = controller.get_address().unwrap();
@@ -153,6 +161,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(e)?;
     }
 
+    println!("Now we flush out all the data we're receiving from the controller until we're ready to use it.");
+
+    let (mut stop_tx, mut stop_rx) = futures::channel::oneshot::channel::<()>();
+
+    let flush_thread = std::thread::spawn(move || {
+        let mut itr = controller_itr_l2cap;
+        let mut buf = [0u8; 64];
+
+        loop {
+            // I'm not using async here because when I did it just refused to read even though
+            // it works completely fine in the actual forwarding down below, which is very weird.
+            let res = itr.read(&mut buf);
+
+            match stop_rx.try_recv() {
+                Ok(Some(())) => return Ok(itr),
+                Ok(None) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    });
+
     println!("Binding server to necessary ports. This will fail if we aren't root.");
 
     ctl_server_l2cap.bind(17)?;
@@ -164,15 +193,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Changing name and class");
 
     let session = BluetoothSession::create_session(None)?;
-    let adapter = BluetoothAdapter::init(&session)?;
+    let adapter = BluetoothAdapter::create_adapter(&session, format!("/org/bluez/hci{id}")).unwrap();
 
     adapter.set_alias(controller_name)?;
 
-    let mut cmd = Command::new("hciconfig");
-    cmd.arg("hci0");
-    cmd.arg("class");
-    cmd.arg("0x002508");
-    cmd.spawn().unwrap().wait().unwrap();
+    // TODO: Make this not hci0, but any hci you want
+    let mut hci_device = unsafe {
+        hcidev::HciDev::new(id)
+    }.unwrap();
 
     println!("Advertising the Bluetooth SDP record...");
     println!("Please open the \"Change Grip/Order\" menu.");
@@ -197,6 +225,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     adapter.set_pairable(true)?;
     adapter.set_discoverable(true)?;
 
+    std::thread::sleep(Duration::from_secs(1));
+    unsafe {
+        hci_device.write_class(0x002508);
+    }
+
     println!("Connecting with the Switch... Please open the \"Change Grip/Order\" menu.");
 
     let (switch_ctl_l2cap, ctl_addr) = ctl_server_l2cap.accept()?;
@@ -212,10 +245,51 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let switch_ctl = smol::Async::new(switch_ctl_l2cap).unwrap();
     let switch_itr = smol::Async::new(switch_itr_l2cap).unwrap();
+
+    println!("Stopping flush");
+
+    stop_tx.send(()).unwrap();
+
+    controller_itr_l2cap = flush_thread.join().unwrap().unwrap();
+
     let controller_ctl = smol::Async::new(controller_ctl_l2cap).unwrap();
     let controller_itr = smol::Async::new(controller_itr_l2cap).unwrap();
 
-    
+    println!("Stopped flush");
+
+
+    // println!("This little maneuver is about to cost us 15ms");
+
+    // let adapter_devid = libc_check_error(unsafe {
+    //     libbluetooth::hci_lib::hci_devid(adapter_addr_str.as_ptr() as *const i8)
+    // }).unwrap();
+
+    // let adapter_devid = 0;
+
+    // println!("Adapter device id: {:?}", adapter_devid);
+
+    // let adapter_dd = libc_check_error(unsafe {
+    //     libbluetooth::hci_lib::hci_open_dev(adapter_devid as i32)
+    // }).unwrap();
+
+    // let controller_dd = libc_check_error(unsafe {
+    //     libbluetooth::hci_lib::hci_open_dev(controller_devid as i32)
+    // }).unwrap();
+
+    // let n_15ms = 24; // 24 * 0.625 = 15
+
+    // 1  =  0.625ms
+    // 24 = 15.000ms
+    // hci_utils::hci_sniff_mode(
+    //     adapter_dd, 0x1, 100, 4,
+    //     40, 40, 1000
+    // ).unwrap();
+
+    // std::thread::sleep(Duration::from_secs(10));
+    // std::process::exit(0);
+
+
+
     // let ctl_relay = std::thread::spawn(move || {
     //     let (mut sw_ctl_r, mut sw_ctl_w) = switch_ctl.split();
     //     let (mut cn_ctl_r, mut cn_ctl_w) = controller_ctl.split();
@@ -223,13 +297,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     smol::run(async {
     //         let mut controller_incoming = [0u8; 512];
     //         let mut switch_incoming = [0u8; 512];
-            
+
     //         let mut sw_r = sw_ctl_r.read(&mut switch_incoming);
     //         let mut cn_r = cn_ctl_r.read(&mut controller_incoming);
-            
+
     //         let mut total_read_from_cn = 0;
     //         let mut total_read_from_sw = 0;
-            
+
     //         loop {
     //             let both_r = futures::future::select(sw_r, cn_r);
 
@@ -244,11 +318,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     //                     }
 
     //                     cn_ctl_w.write_all(&switch_incoming[0..n]).await.unwrap();
-                        
+
     //                     cn_r = old_cn_r;
     //                     sw_r = sw_ctl_r.read(&mut switch_incoming);
     //                 },
-                    
+
     //                 // Read successfully from controller
     //                 future::Either::Right((Ok(n), old_sw_r)) => {
     //                     total_read_from_cn += n;
@@ -261,11 +335,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     //                     // dbg!(n);
 
     //                     sw_ctl_w.write_all(&controller_incoming[0..n]).await.unwrap();
-                        
+
     //                     sw_r = old_sw_r;
     //                     cn_r = cn_ctl_r.read(&mut controller_incoming);
     //                 },
-                    
+
     //                 // Read failed from switch
     //                 future::Either::Left((Err(e), _old_cn_r)) => {
     //                     println!("Read from switch failed: {}", e);
@@ -279,7 +353,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //                 },
     //             };
     //         }
-            
+
     //         println!("CTL finished.");
     //         println!("Total bytes from from controller: {}", total_read_from_cn);
     //         println!("Total bytes from from switch    : {}", total_read_from_sw);
@@ -288,99 +362,99 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
     // let itr_relay = std::thread::spawn(move || {
-        let (mut sw_itr_r, mut sw_itr_w) = switch_itr.split();
-        let (mut cn_itr_r, mut cn_itr_w) = controller_itr.split();
+    let (mut sw_itr_r, mut sw_itr_w) = switch_itr.split();
+    let (mut cn_itr_r, mut cn_itr_w) = controller_itr.split();
 
-        smol::run(async {
-            let mut controller_incoming = [0u8; 128];
-            let mut switch_incoming = [0u8; 128];
+    smol::run(async {
+        let mut controller_incoming = [0u8; 128];
+        let mut switch_incoming = [0u8; 128];
 
-            let mut last_cn_len = 0;
-            let mut last_sw_len = 0;
-            
-            let mut sw_r = sw_itr_r.read(&mut switch_incoming);
-            let mut cn_r = cn_itr_r.read(&mut controller_incoming);
+        let mut last_cn_len = 0;
+        let mut last_sw_len = 0;
 
-            let mut total_read_from_cn = 0;
-            let mut total_read_from_sw = 0;
+        let mut sw_r = sw_itr_r.read(&mut switch_incoming);
+        let mut cn_r = cn_itr_r.read(&mut controller_incoming);
 
-            loop {
-                let both_r = futures::future::select(sw_r, cn_r);
+        let mut total_read_from_cn = 0;
+        let mut total_read_from_sw = 0;
 
-                match both_r.await {
-                    // Read successfully from switch
-                    future::Either::Left((Ok(n), old_cn_r)) => {
-                        total_read_from_sw += n;
-                        last_sw_len = n;
+        loop {
+            let both_r = futures::future::select(sw_r, cn_r);
 
-                        if n == 0 {
-                            println!("Read 0 bytes from switch itr. Closing");
-                            break;
-                        }
+            match both_r.await {
+                // Read successfully from switch
+                future::Either::Left((Ok(n), old_cn_r)) => {
+                    total_read_from_sw += n;
+                    last_sw_len = n;
 
-                        cn_itr_w.write_all(&switch_incoming[0..n]).await.unwrap();
-                        
-                        cn_r = old_cn_r;
-                        sw_r = sw_itr_r.read(&mut switch_incoming);
-                    },
-
-                    // Read successfully from controller
-                    future::Either::Right((Ok(n), old_sw_r)) => {
-                        total_read_from_cn += n;
-                        last_cn_len = n;
-
-                        if n == 0 {
-                            println!("Read 0 bytes from controller itr. Closing");
-                            break;
-                        }
-                        
-                        // dbg!(n);
-
-                        let hid_packet = &mut controller_incoming[1..n];
-
-                        if n == 50 && (hid_packet[0], hid_packet[14]) == (0x21, 0x02) {
-                            println!("Got a device info packet.");
-
-                            let mut old_addr = BtAddr([0; 6]);
-                            old_addr.0.copy_from_slice(&hid_packet[19..25]);
-                            
-                            println!("Old address: {}", old_addr);
-
-                            hid_packet[19..25].copy_from_slice(&adapter_addr.0[..]);
-                            
-                            println!("New address: {}", adapter_addr);
-                        }
-                        
-                        sw_itr_w.write_all(&controller_incoming[0..n]).await.unwrap();
-
-                        sw_r = old_sw_r;
-                        cn_r = cn_itr_r.read(&mut controller_incoming);
-                    },
-
-                    // Read failed from switch
-                    future::Either::Left((Err(e), _old_cn_r)) => {
-                        println!("Read from switch failed: {}", e);
+                    if n == 0 {
+                        println!("Read 0 bytes from switch itr. Closing");
                         break;
-                    },
+                    }
 
-                    // Read failed from controller
-                    future::Either::Right((Err(e), _old_sw_r)) => {
-                        println!("Read from controller failed: {}", e);
+                    cn_itr_w.write_all(&switch_incoming[0..n]).await.unwrap();
+
+                    cn_r = old_cn_r;
+                    sw_r = sw_itr_r.read(&mut switch_incoming);
+                }
+
+                // Read successfully from controller
+                future::Either::Right((Ok(mut n), old_sw_r)) => {
+                    total_read_from_cn += n;
+                    last_cn_len = n;
+
+                    if n == 0 {
+                        println!("Read 0 bytes from controller itr. Closing");
                         break;
-                    },
-                };
-            }
+                    }
 
-            println!("ITR finished.");
-            println!("Dumping last read from controller");
-            println!("{}", hexdump(&controller_incoming[..last_cn_len]));
-            
-            println!("Dumping last read from switch");
-            println!("{}", hexdump(&switch_incoming[..last_sw_len]));
+                    // dbg!(n);
 
-            println!("Total bytes from from controller: {}", total_read_from_cn);
-            println!("Total bytes from from switch    : {}", total_read_from_sw);
-        });
+                    let hid_packet = &mut controller_incoming[1..n];
+
+                    if n == 50 && (hid_packet[0], hid_packet[14]) == (0x21, 0x02) {
+                        println!("Got a device info packet.");
+
+                        let mut old_addr = BtAddr([0; 6]);
+                        old_addr.0.copy_from_slice(&hid_packet[19..25]);
+
+                        println!("Old address: {}", old_addr);
+
+                        hid_packet[19..25].copy_from_slice(&adapter_addr.0[..]);
+
+                        println!("New address: {}", adapter_addr);
+                    }
+
+                    sw_itr_w.write_all(&controller_incoming[0..n]).await.unwrap();
+
+                    sw_r = old_sw_r;
+                    cn_r = cn_itr_r.read(&mut controller_incoming);
+                }
+
+                // Read failed from switch
+                future::Either::Left((Err(e), _old_cn_r)) => {
+                    println!("Read from switch failed: {}", e);
+                    break;
+                }
+
+                // Read failed from controller
+                future::Either::Right((Err(e), _old_sw_r)) => {
+                    println!("Read from controller failed: {}", e);
+                    break;
+                }
+            };
+        }
+
+        println!("ITR finished.");
+        println!("Dumping last read from controller");
+        println!("{}", hexdump(&controller_incoming[..last_cn_len]));
+
+        println!("Dumping last read from switch");
+        println!("{}", hexdump(&switch_incoming[..last_sw_len]));
+
+        println!("Total bytes from from controller: {}", total_read_from_cn);
+        println!("Total bytes from from switch    : {}", total_read_from_sw);
+    });
     // });
 
     // ctl_relay.join().unwrap();
@@ -391,9 +465,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
-
 use std::fmt::Write as FmtWrite;
+use std::borrow::BorrowMut;
+use crate::libc_helpe::libc_check_error;
 
 fn hexdump(buf: &[u8]) -> String {
     let mut out = String::with_capacity(buf.len() * 4);
@@ -402,13 +476,13 @@ fn hexdump(buf: &[u8]) -> String {
         for byte in chunk {
             write!(out, "{:02x} ", byte);
         }
-        
+
         for _ in 0..16 - chunk.len() {
             out.push_str("   ");
         }
-        
+
         out.push(' ');
-        
+
         for byte in chunk {
             let c = *byte as char;
 
@@ -421,6 +495,6 @@ fn hexdump(buf: &[u8]) -> String {
 
         out.push('\n');
     }
-    
+
     out
 }

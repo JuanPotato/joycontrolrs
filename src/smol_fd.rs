@@ -1,16 +1,7 @@
 use std::ffi::c_void;
 use std::io::{Error, Read, Result, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-
-use num_traits::{PrimInt, Signed, Zero};
-
-pub fn libc_check_error<T: Signed + PrimInt + Zero>(val: T) -> Result<T> {
-    if val < T::zero() {
-        Err(Error::last_os_error())
-    } else {
-        Ok(val)
-    }
-}
+use crate::libc_helpe::libc_check_error;
 
 #[derive(Debug)]
 pub struct SmolFd {
